@@ -1,0 +1,102 @@
+pool:
+  vmImage: 'Ubuntu 16.04'
+
+variables:
+  APP_NAME: "user"
+  ARTEFACT_ID: "sockshop/$(APP_NAME)"
+  DOCKER_REGISTRY: "$(dockerRegistryEndpoint)"
+  SUBSCRIPTION_ENDPOINT: "InnovationLab-Dev"
+
+steps:
+- script: |
+    versionFromFile=$(cat ./version)
+    theTag=$(DOCKER_REGISTRY)/$(ARTEFACT_ID)
+    theDevTag=$theTag-$versionFromFile-$(Build.BuildId)
+    TheStageTag=$theTag-$versionFromFile
+    echo "##vso[task.setvariable variable=VERSION]$versionFromFile"
+    echo "##vso[task.setvariable variable=TAG]$theTag"
+    echo "##vso[task.setvariable variable=TAG_DEV]$theDevTag"
+    echo "##vso[task.setvariable variable=TAG_STAGING]$TheStageTag"
+  displayName: 'Set build variables'
+
+- script: |
+    echo VERSION = $(VERSION)
+    echo TAG = $(TAG)
+    echo TAG_DEV = $(TAG_DEV)
+    echo TAG_STAGING = $(TAG_STAGING)
+  displayName: 'Echo build variables values'
+
+- script: |
+    sed -i 's#image: .*#image: $(TAG_DEV)#' manifest/$(APP_NAME).yml
+    cat manifest/$(APP_NAME).yml
+  displayName: 'Update Kubernetes YAML'
+
+- powershell: |
+    Write-Host '##vso[task.setvariable variable=GOPATH]$(System.DefaultWorkingDirectory)'
+  displayName: 'Set GOPATH environment variable'
+
+- task: CmdLine@2
+  inputs:
+    displayName: 'Print Environment Info'
+    script: printenv
+
+- task: CmdLine@2
+  inputs:
+    displayName: 'glide GO package manager install'
+    script: |
+      sudo mkdir -p /home/vsts/go/src
+      sudo add-apt-repository ppa:masterminds/glide && sudo apt-get update
+      sudo apt-get install glide
+
+- script: |
+    echo GOPATH=$(GOPATH)
+    go version
+    cd $(System.DefaultWorkingDirectory)
+    echo PWD before making dirs
+    pwd
+    mkdir -p src/github.com/dynatrace-sockshop/$(APP_NAME)/
+    cp -R ./api src/github.com/dynatrace-sockshop/$(APP_NAME)/
+    cp -R ./db src/github.com/dynatrace-sockshop/$(APP_NAME)/
+    cp -R ./users src/github.com/dynatrace-sockshop/$(APP_NAME)/
+    cp -R ./main.go src/github.com/dynatrace-sockshop/$(APP_NAME)/
+    cp -R ./glide.* src/github.com/dynatrace-sockshop/$(APP_NAME)/
+    cd src/github.com/dynatrace-sockshop/$(APP_NAME) && ls -lsa
+    echo PWD before doing glide install
+    pwd
+    glide install
+    echo PWD before doing go build
+    pwd
+    go build -a -ldflags -linkmode=external -installsuffix cgo -o $(GOPATH)/$(APP_NAME) main.go
+  displayName: 'GO Build'
+
+- task: Docker@1
+  displayName: 'Build an image'
+  inputs:
+    imageName: $(TAG_DEV)
+
+- task: Docker@1
+  displayName: Login
+  inputs:
+    azureSubscriptionEndpoint: $(SUBSCRIPTION_ENDPOINT)
+    azureContainerRegistry: $(DOCKER_REGISTRY)
+    command: login
+
+- task: Docker@1
+  displayName: 'Push an image'
+  inputs:
+    azureSubscriptionEndpoint: $(SUBSCRIPTION_ENDPOINT)
+    azureContainerRegistry: $(DOCKER_REGISTRY)
+    command: 'push'
+    imageName: $(TAG_DEV)
+
+- task: CopyFiles@2
+  displayName: Create Archive with Kubernetes YAML
+  inputs:
+    contents: manifest/*
+    targetFolder: $(Build.ArtifactStagingDirectory)
+
+- task: PublishBuildArtifacts@1
+  displayName: Publish Archive with Kubernetes YAML
+  inputs:
+    pathtoPublish: $(Build.ArtifactStagingDirectory)
+    artifactName: Yaml
